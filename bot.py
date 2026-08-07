@@ -117,6 +117,17 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
         'quiet': False,
         'no_warnings': False,
         'progress_hooks': [],
+        # Handle age-restricted and sign-in required videos
+        'age_limit': None,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],
+                'skip': ['hls', 'dash']
+            }
+        },
+        # Try to bypass geo-restrictions
+        'geo_bypass': True,
+        'geo_bypass_country': 'US',
     }
     
     try:

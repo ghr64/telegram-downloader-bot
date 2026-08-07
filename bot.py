@@ -8,10 +8,10 @@ Automatically splits files that exceed Telegram's limits
 import os
 import logging
 import asyncio
-from pathlib import Path
-from typing import Optional, List
 import shutil
 import subprocess
+from pathlib import Path
+from typing import Optional, List
 
 from telegram import Update, Message
 from telegram.ext import (
@@ -119,6 +119,15 @@ async def check_video_height(video_path: Path) -> Optional[int]:
     return None
 
 
+def check_deno_available() -> bool:
+    """Check if Deno is available."""
+    try:
+        result = subprocess.run(['deno', '--version'], capture_output=True, timeout=5)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 async def download_video(url: str, user_id: int) -> Optional[Path]:
     """Download video using yt-dlp with advanced bot detection bypass."""
     user_download_dir = DOWNLOAD_DIR / str(user_id)
@@ -129,59 +138,63 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
     # Check for cookies file
     cookies_file = Path('./cookies.txt')
     
+    # Check if Deno is available
+    deno_available = check_deno_available()
+    logger.info(f"Deno available: {deno_available}")
+    
     # Define multiple download strategies (fallback chain)
-    # Based on proven GitHub Actions workflow techniques
+    # Prioritize strategies that work without Deno first
     strategies = [
-        # Strategy 1: Web client + Deno JS solver + remote EJS (best for challenges)
+        # Strategy 1: web_embedded client - works well for bot detection (no Deno needed)
         {
-            'name': 'web+deno+ejs_github',
-            'extractor_args': {'youtube': {'player_client': ['web']}},
-            'js_runtimes': ['deno'],
-            'remote_components': ['ejs:github'],
+            'name': 'web_embedded',
+            'extractor_args': {'youtube': {'player_client': ['web_embedded']}},
+            'js_runtimes': None,
+            'remote_components': None,
         },
-        # Strategy 2: Web client + Deno + EJS via NPM
-        {
-            'name': 'web+deno+ejs_npm',
-            'extractor_args': {'youtube': {'player_client': ['web']}},
-            'js_runtimes': ['deno'],
-            'remote_components': ['ejs:npm'],
-        },
-        # Strategy 3: Multiple clients combined + Deno + EJS
-        {
-            'name': 'web_mweb_android_vr+deno+ejs',
-            'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'android_vr']}},
-            'js_runtimes': ['deno'],
-            'remote_components': ['ejs:github'],
-        },
-        # Strategy 4: mweb client (mobile web)
+        # Strategy 2: mweb (mobile web) - often bypasses bot detection
         {
             'name': 'mweb',
             'extractor_args': {'youtube': {'player_client': ['mweb']}},
             'js_runtimes': None,
             'remote_components': None,
         },
-        # Strategy 5: Android VR client
+        # Strategy 3: android_vr - VR client
         {
             'name': 'android_vr',
             'extractor_args': {'youtube': {'player_client': ['android_vr']}},
             'js_runtimes': None,
             'remote_components': None,
         },
-        # Strategy 6: Web client no-proxy + Deno + EJS
+        # Strategy 4: tv_embedded - embedded TV client
         {
-            'name': 'web+deno+ejs_noproxy',
-            'extractor_args': {'youtube': {'player_client': ['web']}},
-            'js_runtimes': ['deno'],
-            'remote_components': ['ejs:github'],
-        },
-        # Strategy 7: mweb no-proxy
-        {
-            'name': 'mweb_noproxy',
-            'extractor_args': {'youtube': {'player_client': ['mweb']}},
+            'name': 'tv_embedded',
+            'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
             'js_runtimes': None,
             'remote_components': None,
         },
-        # Strategy 8: Android client (last resort, lower quality)
+        # Strategy 5: web + default (fallback)
+        {
+            'name': 'web+default',
+            'extractor_args': {'youtube': {'player_client': ['web', 'default']}},
+            'js_runtimes': None,
+            'remote_components': None,
+        },
+        # Strategy 6: Multiple clients combined (if Deno available)
+        {
+            'name': 'web_mweb_android_vr+deno+ejs',
+            'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'android_vr']}},
+            'js_runtimes': ['deno'] if deno_available else None,
+            'remote_components': ['ejs:github'] if deno_available else None,
+        },
+        # Strategy 7: Web client + Deno + EJS (if Deno available)
+        {
+            'name': 'web+deno+ejs',
+            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'js_runtimes': ['deno'] if deno_available else None,
+            'remote_components': ['ejs:github'] if deno_available else None,
+        },
+        # Strategy 8: android fallback (last resort)
         {
             'name': 'android_fallback',
             'extractor_args': {'youtube': {'player_client': ['android']}},
@@ -227,7 +240,13 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
     # Try each strategy until one works
     for i, strategy in enumerate(strategies, 1):
         strategy_name = strategy['name']
-        logger.info(f"Trying download strategy {i}/8: {strategy_name}")
+        
+        # Skip Deno-dependent strategies if Deno not available
+        if strategy['js_runtimes'] and not deno_available:
+            logger.info(f"Skipping {strategy_name}: Deno not available")
+            continue
+            
+        logger.info(f"Trying download strategy {i}/{len(strategies)}: {strategy_name}")
         
         # Build options for this strategy
         ydl_opts = base_opts.copy()
@@ -241,6 +260,8 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
         # Add strategy-specific user agent
         if strategy_name == 'android_fallback':
             ydl_opts['headers']['User-Agent'] = 'Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'
+        elif strategy_name == 'mweb':
+            ydl_opts['headers']['User-Agent'] = 'Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -256,7 +277,7 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
                     if height:
                         logger.info(f"Downloaded video height: {height}px")
                         # For 'best' quality, reject if only 360p (sign of failed challenge)
-                        if height <= 360 and i < 8:
+                        if height <= 360 and i < len(strategies):
                             logger.warning(f"Strategy {strategy_name} only got {height}p, trying next strategy...")
                             video_path.unlink(missing_ok=True)
                             continue
@@ -274,7 +295,7 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
             continue
     
     # All strategies failed
-    logger.error(f"All 8 download strategies failed. Last error: {last_error}")
+    logger.error(f"All download strategies failed. Last error: {last_error}")
     raise last_error or Exception("All download strategies failed")
 
 

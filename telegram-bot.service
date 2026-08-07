@@ -1,0 +1,22 @@
+# Systemd Service Configuration
+# Copy this file to /etc/systemd/system/telegram-bot.service
+
+[Unit]
+Description=Telegram Video Downloader Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your-username
+WorkingDirectory=/path/to/telegram-downloader-bot
+Environment="TELEGRAM_BOT_TOKEN=your_token_here"
+ExecStart=/path/to/telegram-downloader-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=append:/var/log/telegram-bot.log
+StandardError=append:/var/log/telegram-bot-error.log
+
+[Install]
+WantedBy=multi-user.target

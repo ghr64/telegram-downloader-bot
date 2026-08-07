@@ -110,6 +110,9 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
     
     output_template = str(user_download_dir / '%(title)s.%(ext)s')
     
+    # Check for cookies file
+    cookies_file = Path('./cookies.txt')
+    
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_template,
@@ -129,6 +132,11 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
         'geo_bypass': True,
         'geo_bypass_country': 'US',
     }
+    
+    # Add cookies if file exists
+    if cookies_file.exists():
+        ydl_opts['cookiefile'] = str(cookies_file)
+        logger.info("Using cookies.txt for authentication")
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

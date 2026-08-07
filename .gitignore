@@ -13,6 +13,10 @@ ENV/
 
 # Downloads directory
 downloads/
+
+# YouTube cookies (sensitive session data)
+cookies.txt
+cookies*.txt
 *.mp4
 *.mkv
 *.webm

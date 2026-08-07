@@ -1,11 +1,17 @@
 [build]
 builder = "NIXPACKS"
 
+[start]
+cmd = "python bot.py"
+
 [deploy]
-startCommand = "python bot.py"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
 
-# Build command to install Deno and dependencies
+# Install system dependencies including Deno
 [nixpacks]
 aptPkgs = ["ffmpeg", "deno", "unzip"]
+
+# Python requirements
+[[ports]]
+port = "8080"

@@ -3,6 +3,7 @@
 Telegram YouTube/Instagram Downloader Bot
 Downloads videos from YouTube and Instagram using yt-dlp
 Automatically splits files that exceed Telegram's limits
+Supports both polling and webhook modes for Railway deployment
 """
 
 import os
@@ -36,6 +37,11 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DOWNLOAD_DIR = Path('./downloads')
 TELEGRAM_FILE_LIMIT = 2000 * 1024 * 1024  # 2GB limit for bots
 CHUNK_SIZE = 1900 * 1024 * 1024  # 1.9GB per chunk to be safe
+
+# Railway deployment settings
+RAILWAY_STATIC_URL = os.getenv('RAILWAY_STATIC_URL')  # e.g., https://xxx.up.railway.app
+WEBHOOK_PORT = int(os.getenv('PORT', '8080'))
+USE_WEBHOOK = bool(RAILWAY_STATIC_URL)
 
 # Ensure download directory exists
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -401,13 +407,109 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 
+async def health_check(request):
+    """Health check endpoint for Railway."""
+    from aiohttp import web
+    return web.Response(text="OK")
+
+
+async def setup_webhook(application: Application) -> None:
+    """Set up webhook for Railway deployment."""
+    if not RAILWAY_STATIC_URL:
+        return
+    
+    webhook_url = f"{RAILWAY_STATIC_URL}/webhook"
+    logger.info(f"Setting webhook to: {webhook_url}")
+    
+    try:
+        await application.bot.set_webhook(
+            url=webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            timeout=30
+        )
+        logger.info("✅ Webhook set successfully")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
+        raise
+
+
+def create_webhook_app(application: Application):
+    """Create aiohttp web application for webhook."""
+    from aiohttp import web
+    
+    async def handle_webhook(request):
+        """Handle incoming webhook updates."""
+        try:
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+            return web.Response(text="OK")
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return web.Response(text="Error", status=500)
+    
+    async def handle_health(request):
+        """Health check endpoint."""
+        return web.Response(text="OK")
+    
+    app = web.Application()
+    app.router.add_post('/webhook', handle_webhook)
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/', handle_health)
+    
+    return app
+
+
+async def run_webhook_mode(application: Application):
+    """Run bot in webhook mode for Railway."""
+    from aiohttp import web
+    
+    # Initialize application
+    await application.initialize()
+    
+    # Set up webhook
+    await setup_webhook(application)
+    
+    # Create web app
+    web_app = create_webhook_app(application)
+    
+    # Start web server
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, '0.0.0.0', WEBHOOK_PORT)
+    await site.start()
+    
+    logger.info(f"🚀 Webhook server started on port {WEBHOOK_PORT}")
+    logger.info(f"🌐 Webhook URL: {RAILWAY_STATIC_URL}/webhook")
+    
+    # Keep running
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await runner.cleanup()
+        await application.shutdown()
+
+
 def main() -> None:
     """Start the bot."""
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set!")
     
-    # Create the Application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Create the Application with increased timeouts
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .build()
+    )
     
     # Register handlers
     application.add_handler(CommandHandler("start", start))
@@ -419,7 +521,17 @@ def main() -> None:
     
     # Start the bot
     logger.info("Bot started!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    if USE_WEBHOOK:
+        logger.info("🔗 Running in WEBHOOK mode for Railway")
+        asyncio.run(run_webhook_mode(application))
+    else:
+        logger.info("🔄 Running in POLLING mode")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            timeout=30,
+            drop_pending_updates=True
+        )
 
 
 if __name__ == '__main__':

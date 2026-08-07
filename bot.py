@@ -11,6 +11,7 @@ import asyncio
 from pathlib import Path
 from typing import Optional, List
 import shutil
+import subprocess
 
 from telegram import Update, Message
 from telegram.ext import (
@@ -103,8 +104,23 @@ def split_file(file_path: Path, chunk_size: int = CHUNK_SIZE) -> List[Path]:
     return chunks
 
 
+async def check_video_height(video_path: Path) -> Optional[int]:
+    """Check video height using ffprobe."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
+             '-show_entries', 'stream=height', '-of', 'csv=p=0', str(video_path)],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip().isdigit():
+            return int(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 async def download_video(url: str, user_id: int) -> Optional[Path]:
-    """Download video using yt-dlp."""
+    """Download video using yt-dlp with advanced bot detection bypass."""
     user_download_dir = DOWNLOAD_DIR / str(user_id)
     user_download_dir.mkdir(exist_ok=True)
     
@@ -113,48 +129,153 @@ async def download_video(url: str, user_id: int) -> Optional[Path]:
     # Check for cookies file
     cookies_file = Path('./cookies.txt')
     
-    ydl_opts = {
+    # Define multiple download strategies (fallback chain)
+    # Based on proven GitHub Actions workflow techniques
+    strategies = [
+        # Strategy 1: Web client + Deno JS solver + remote EJS (best for challenges)
+        {
+            'name': 'web+deno+ejs_github',
+            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'js_runtimes': ['deno'],
+            'remote_components': ['ejs:github'],
+        },
+        # Strategy 2: Web client + Deno + EJS via NPM
+        {
+            'name': 'web+deno+ejs_npm',
+            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'js_runtimes': ['deno'],
+            'remote_components': ['ejs:npm'],
+        },
+        # Strategy 3: Multiple clients combined + Deno + EJS
+        {
+            'name': 'web_mweb_android_vr+deno+ejs',
+            'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'android_vr']}},
+            'js_runtimes': ['deno'],
+            'remote_components': ['ejs:github'],
+        },
+        # Strategy 4: mweb client (mobile web)
+        {
+            'name': 'mweb',
+            'extractor_args': {'youtube': {'player_client': ['mweb']}},
+            'js_runtimes': None,
+            'remote_components': None,
+        },
+        # Strategy 5: Android VR client
+        {
+            'name': 'android_vr',
+            'extractor_args': {'youtube': {'player_client': ['android_vr']}},
+            'js_runtimes': None,
+            'remote_components': None,
+        },
+        # Strategy 6: Web client no-proxy + Deno + EJS
+        {
+            'name': 'web+deno+ejs_noproxy',
+            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'js_runtimes': ['deno'],
+            'remote_components': ['ejs:github'],
+        },
+        # Strategy 7: mweb no-proxy
+        {
+            'name': 'mweb_noproxy',
+            'extractor_args': {'youtube': {'player_client': ['mweb']}},
+            'js_runtimes': None,
+            'remote_components': None,
+        },
+        # Strategy 8: Android client (last resort, lower quality)
+        {
+            'name': 'android_fallback',
+            'extractor_args': {'youtube': {'player_client': ['android']}},
+            'js_runtimes': None,
+            'remote_components': None,
+        },
+    ]
+    
+    # Common base options
+    base_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
         'quiet': False,
         'no_warnings': False,
         'progress_hooks': [],
-        # Handle age-restricted and sign-in required videos
         'age_limit': None,
-        # Workaround for YouTube's bot detection - use web_embedded player client
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['default', 'web_embedded'],
-                'skip': ['hls', 'dash']
-            }
-        },
-        # Try to bypass geo-restrictions
         'geo_bypass': True,
         'geo_bypass_country': 'US',
-        # Additional headers to look more like a legitimate browser
         'headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Sec-Fetch-Mode': 'navigate',
         },
+        'retries': 5,
+        'fragment_retries': 5,
+        'no_check_certificates': True,
+        'concurrent_fragments': 8,
+        'buffer_size': '16K',
+        'http_chunk_size': '10M',
+        'no_part': True,
+        'no_playlist': True,
     }
     
     # Add cookies if file exists
     if cookies_file.exists():
-        ydl_opts['cookiefile'] = str(cookies_file)
+        base_opts['cookiefile'] = str(cookies_file)
         logger.info("Using cookies.txt for authentication")
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            logger.info(f"Downloading from: {url}")
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            return Path(filename)
-    except Exception as e:
-        logger.error(f"Download failed: {e}")
-        raise
+    last_error = None
+    
+    # Try each strategy until one works
+    for i, strategy in enumerate(strategies, 1):
+        strategy_name = strategy['name']
+        logger.info(f"Trying download strategy {i}/8: {strategy_name}")
+        
+        # Build options for this strategy
+        ydl_opts = base_opts.copy()
+        ydl_opts.update(strategy['extractor_args'])
+        
+        if strategy['js_runtimes']:
+            ydl_opts['js_runtimes'] = strategy['js_runtimes']
+        if strategy['remote_components']:
+            ydl_opts['remote_components'] = strategy['remote_components']
+        
+        # Add strategy-specific user agent
+        if strategy_name == 'android_fallback':
+            ydl_opts['headers']['User-Agent'] = 'Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                logger.info(f"Downloading from: {url} using {strategy_name}")
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                video_path = Path(filename)
+                
+                # Verify quality for non-best strategies
+                if video_path.exists() and video_path.stat().st_size > 0:
+                    # Check actual video height
+                    height = await check_video_height(video_path)
+                    if height:
+                        logger.info(f"Downloaded video height: {height}px")
+                        # For 'best' quality, reject if only 360p (sign of failed challenge)
+                        if height <= 360 and i < 8:
+                            logger.warning(f"Strategy {strategy_name} only got {height}p, trying next strategy...")
+                            video_path.unlink(missing_ok=True)
+                            continue
+                    
+                    logger.info(f"✅ Download successful with strategy: {strategy_name}")
+                    return video_path
+                    
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Strategy {strategy_name} failed: {e}")
+            # Clean up any partial files
+            for partial in user_download_dir.glob('*.part'):
+                partial.unlink(missing_ok=True)
+            await asyncio.sleep(2)  # Brief delay between strategies
+            continue
+    
+    # All strategies failed
+    logger.error(f"All 8 download strategies failed. Last error: {last_error}")
+    raise last_error or Exception("All download strategies failed")
 
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -179,7 +300,8 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # Download the video
         await status_message.edit_text(
             "⏳ Downloading video...\n"
-            "This may take a while depending on the video size."
+            "This may take a while depending on the video size.\n"
+            "🔄 Trying multiple strategies to bypass bot detection..."
         )
         
         video_path = await download_video(url, user_id)

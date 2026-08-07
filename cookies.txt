@@ -1,6 +1,6 @@
-# YouTube cookies.txt
-# Contains your YouTube session cookies for bypassing bot detection
-# This file is kept private and excluded from public repos
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
 
 .youtube.com	TRUE	/	TRUE	1820698112	__Secure-YENID	17.YTE=HY0e5WHMqMW3Suu6DvVVTDblBgI5rxaqYl-ozxoIIzfwiv1VBbLC9pGrBuFmCUqAYQWvxnfqR3qcazLrDTWTElM7DXDfbME4wDxPSRslqGEYb5CSlG2N147AeWlQpqxPDZyUfyaNVFXqo1QOWod9xZ4aq3S8nFiRI4NFPbqmdMWm_K6CH1zvNz0NJAoGueWzRaMBSULOZt9Fmu0lpkggExp2ds7eJd92khcmNz8N0vM_yj1ACnW3_fOIAN7K_ZF5Fx61VdLWcnbPl2KNC_xJCiLZ7Nf44hFTiLRYFMxaSdgVJ46v76PbBxX_mZFFDu6klh_zAc2jgqNt2_WM3G2ORA
 .youtube.com	TRUE	/	FALSE	1817674115	SIDCC	AKEyXzXUM8lCcNQXCrOu6bG1gwEG1rWQhWQuN4vdlg4bIS61Idk81EGAFxssjj4Tgsd7sUR9FA

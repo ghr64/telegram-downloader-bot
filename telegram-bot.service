@@ -1,5 +1,6 @@
 # Systemd Service Configuration
 # Copy this file to /etc/systemd/system/telegram-bot.service
+# Replace USERNAME and /path/to/bot with your actual values
 
 [Unit]
 Description=Telegram Video Downloader Bot
@@ -7,10 +8,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=your-username
-WorkingDirectory=/path/to/telegram-downloader-bot
-Environment="TELEGRAM_BOT_TOKEN=your_token_here"
-ExecStart=/path/to/telegram-downloader-bot/venv/bin/python bot.py
+User=YOUR_USERNAME
+WorkingDirectory=/PATH/TO/TELEGRAM-DOWNLOADER-BOT
+Environment="TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE"
+ExecStart=/PATH/TO/TELEGRAM-DOWNLOADER-BOT/venv/bin/python bot.py
 Restart=always
 RestartSec=10
 

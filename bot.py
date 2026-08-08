@@ -6,12 +6,15 @@ Automatically splits files that exceed Telegram's limits
 """
 
 import os
+import sys
 import logging
-import asyncio
+import traceback
 import shutil
 import subprocess
+import json
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
 from telegram import Update
 from telegram.ext import (
@@ -22,11 +25,23 @@ from telegram.ext import (
     filters
 )
 import yt_dlp
+from yt_dlp.utils import DownloadError, ExtractorError
 
-# Configure logging
+# Configure detailed logging
+LOG_DIR = Path('./logs')
+LOG_DIR.mkdir(exist_ok=True)
+
+# Create timestamped log file
+timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+log_file = LOG_DIR / f'download_{timestamp}.log'
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG,
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -38,6 +53,32 @@ CHUNK_SIZE = 1900 * 1024 * 1024  # 1.9GB per chunk to be safe
 
 # Ensure download directory exists
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+
+def format_error_details(error: Exception, context: Dict[str, Any]) -> str:
+    """Format detailed error information for debugging."""
+    error_info = {
+        'timestamp': str(datetime.now()),
+        'error_type': type(error).__name__,
+        'error_message': str(error),
+        'traceback': traceback.format_exc(),
+        'context': context
+    }
+    
+    # Add specific error details
+    if hasattr(error, 'args') and error.args:
+        error_info['args'] = error.args
+    
+    if isinstance(error, ExtractorError):
+        error_info['extractor_error'] = {
+            'expected': error.expected,
+            'video_id': getattr(error, 'video_id', None)
+        }
+    
+    if isinstance(error, DownloadError):
+        error_info['download_error'] = True
+    
+    return json.dumps(error_info, indent=2, default=str)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -81,7 +122,7 @@ def split_file(file_path: Path, chunk_size: int = CHUNK_SIZE) -> List[Path]:
     if file_size <= TELEGRAM_FILE_LIMIT:
         return [file_path]
     
-    logger.info(f"File size {file_size} bytes exceeds limit. Splitting...")
+    logger.info(f"File size {file_size} bytes exceeds limit. Splitting into {file_size // chunk_size + 1} chunks...")
     
     chunks = []
     chunk_num = 1
@@ -98,13 +139,25 @@ def split_file(file_path: Path, chunk_size: int = CHUNK_SIZE) -> List[Path]:
             
             chunks.append(chunk_path)
             chunk_num += 1
-            logger.info(f"Created chunk {chunk_num - 1}: {chunk_path.name}")
+            logger.info(f"Created chunk {chunk_num - 1}: {chunk_path.name} ({len(chunk_data)} bytes)")
     
     return chunks
 
 
+def create_download_context(url: str, user_id: int, strategy_name: str) -> Dict[str, Any]:
+    """Create debug context for download operations."""
+    return {
+        'url': url,
+        'user_id': user_id,
+        'download_dir': str(DOWNLOAD_DIR / str(user_id)),
+        'strategy': strategy_name,
+        'cookies_file': str(Path('./cookies.txt')) if Path('./cookies.txt').exists() else 'None',
+        'timestamp': str(datetime.now())
+    }
+
+
 def download_video(url: str, user_id: int) -> Optional[Path]:
-    """Download video using yt-dlp with multiple strategies."""
+    """Download video using yt-dlp with multiple strategies and detailed logging."""
     user_download_dir = DOWNLOAD_DIR / str(user_id)
     user_download_dir.mkdir(exist_ok=True)
     
@@ -112,51 +165,152 @@ def download_video(url: str, user_id: int) -> Optional[Path]:
     
     # Check for cookies file
     cookies_file = Path('./cookies.txt')
+    logger.info(f"Cookies file exists: {cookies_file.exists()}")
     
-    # Strategies that don't require Deno (most reliable)
+    # Strategies in order of reliability
     strategies = [
-        {'name': 'web_embedded', 'client': 'web_embedded'},
-        {'name': 'mweb', 'client': 'mweb'},
-        {'name': 'android_vr', 'client': 'android_vr'},
-        {'name': 'tv_embedded', 'client': 'tv_embedded'},
-        {'name': 'web_default', 'client': 'web,default'},
-        {'name': 'android', 'client': 'android'},
+        {'name': 'web_embedded', 'client': 'web_embedded', 'priority': 1},
+        {'name': 'mweb', 'client': 'mweb', 'priority': 2},
+        {'name': 'tv_embedded', 'client': 'tv_embedded', 'priority': 3},
+        {'name': 'android_vr', 'client': 'android_vr', 'priority': 4},
+        {'name': 'android', 'client': 'android', 'priority': 5},
+        {'name': 'web_default', 'client': 'web,default', 'priority': 6},
     ]
+    
+    # Sort by priority
+    strategies.sort(key=lambda x: x['priority'])
+    
+    logger.info(f"Starting download with {len(strategies)} strategies")
+    logger.info(f"URL: {url}")
+    logger.info(f"User ID: {user_id}")
+    logger.info(f"Download directory: {user_download_dir}")
+    
+    errors_by_strategy = {}
     
     for strategy in strategies:
         strategy_name = strategy['name']
-        logger.info(f"Trying strategy: {strategy_name}")
+        logger.info(f"="*60)
+        logger.info(f"Trying strategy {strategy_name} (priority: {strategy['priority']})")
+        logger.info(f"="*60)
+        
+        context = create_download_context(url, user_id, strategy_name)
+        context['strategy_priority'] = strategy['priority']
         
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best[height<=1080]/best',
             'outtmpl': output_template,
             'merge_output_format': 'mp4',
             'quiet': False,
+            'verbose': True,  # Enable verbose output
             'cookiefile': str(cookies_file) if cookies_file.exists() else None,
             'headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Fetch-Mode': 'navigate',
             },
-            'retries': 5,
-            'extractor_args': {'youtube': {'player_client': [strategy['client']]}}
+            'retries': 3,
+            'fragment_retries': 3,
+            'extractor_args': {'youtube': {'player_client': [strategy['client']]}},
+            'progress_hooks': [],
+            'postprocessor_hooks': [],
         }
         
+        # Debug: log configuration
+        logger.debug(f"yt-dlp options for {strategy_name}: {json.dumps(ydl_opts, indent=2, default=str)}")
+        
         try:
+            logger.info(f"Opening yt-dlp with options for {strategy_name}...")
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                video_path = Path(filename)
+                logger.info(f"Extracting info for: {url}")
                 
-                if video_path.exists() and video_path.stat().st_size > 0:
-                    logger.info(f"✅ Download successful: {strategy_name}")
-                    return video_path
+                # Set up progress hooks for detailed logging
+                def progress_hook(d):
+                    status = d.get('status', 'unknown')
+                    logger.debug(f"Progress: {status} - {d}")
                     
-        except Exception as e:
-            logger.warning(f"Strategy {strategy_name} failed: {e}")
+                    if status == 'error':
+                        logger.error(f"Download error details: {json.dumps(d, indent=2, default=str)}")
+                
+                ydl.add_progress_hook(progress_hook)
+                
+                info = ydl.extract_info(url, download=True)
+                logger.info(f"Extraction complete for {strategy_name}")
+                
+                if info:
+                    filename = ydl.prepare_filename(info)
+                    logger.info(f"Prepared filename: {filename}")
+                    
+                    video_path = Path(filename)
+                    
+                    if video_path.exists():
+                        file_size = video_path.stat().st_size
+                        logger.info(f"Downloaded file exists: {video_path}")
+                        logger.info(f"File size: {file_size} bytes ({file_size / (1024*1024):.2f} MB)")
+                        
+                        if file_size > 0:
+                            logger.info(f"✅ SUCCESS: Download with strategy {strategy_name}")
+                            return video_path
+                        else:
+                            logger.warning(f"Downloaded file is empty (0 bytes)")
+                    else:
+                        logger.warning(f"Downloaded file does not exist at expected path")
+                        logger.warning(f"Files in download dir: {list(user_download_dir.glob('*'))}")
+                    
+        except ExtractorError as e:
+            error_details = format_error_details(e, {**context, 'error_category': 'ExtractorError'})
+            errors_by_strategy[strategy_name] = error_details
+            logger.error(f"ExtractorError in {strategy_name}:\n{error_details}")
+            
+            # Check for bot detection
+            if 'bot' in str(e).lower() or 'sign in' in str(e).lower():
+                logger.error(f"🚨 BOT DETECTION DETECTED in strategy {strategy_name}")
             continue
+            
+        except DownloadError as e:
+            error_details = format_error_details(e, {**context, 'error_category': 'DownloadError'})
+            errors_by_strategy[strategy_name] = error_details
+            logger.error(f"DownloadError in {strategy_name}:\n{error_details}")
+            continue
+            
+        except Exception as e:
+            error_details = format_error_details(e, {**context, 'error_category': type(e).__name__})
+            errors_by_strategy[strategy_name] = error_details
+            logger.error(f"Exception in {strategy_name}:\n{error_details}")
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            continue
+        
+        logger.info(f"Strategy {strategy_name} failed, trying next...")
     
-    raise Exception("All download strategies failed")
+    # All strategies failed - compile detailed error report
+    logger.error("="*60)
+    logger.error("ALL DOWNLOAD STRATEGIES FAILED")
+    logger.error("="*60)
+    
+    error_report = {
+        'summary': 'All strategies failed',
+        'url': url,
+        'user_id': user_id,
+        'errors_by_strategy': errors_by_strategy,
+        'timestamp': str(datetime.now()),
+        'cookies_available': cookies_file.exists()
+    }
+    
+    logger.error(f"\n{'='*60}")
+    logger.error(f"ERROR REPORT:")
+    logger.error(f"{'='*60}")
+    for strategy, error in errors_by_strategy.items():
+        logger.error(f"\n{strategy}:")
+        logger.error(error)
+    
+    # Write error report to file
+    error_file = LOG_DIR / f'error_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+    with open(error_file, 'w') as f:
+        json.dump(error_report, f, indent=2, default=str)
+    logger.info(f"Error report saved to: {error_file}")
+    
+    raise Exception(f"All download strategies failed. See logs for details. Error file: {error_file}")
 
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -164,33 +318,43 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     url = update.message.text.strip()
     user_id = update.effective_user.id
     
+    logger.info(f"Received URL from user {user_id}: {url}")
+    
     if not (url.startswith('http://') or url.startswith('https://')):
         await update.message.reply_text("❌ Please send a valid URL starting with http:// or https://")
         return
     
-    status_message = await update.message.reply_text("⏳ Processing your request...")
+    status_message = await update.message.reply_text("⏳ Processing your request...\n📝 Starting download process...")
     
     try:
-        await status_message.edit_text("📥 Downloading video... (may take a while)")
+        await status_message.edit_text("📥 Downloading video...\n(Could take a while depending on video size)")
         
         video_path = download_video(url, user_id)
         
         if not video_path or not video_path.exists():
-            await status_message.edit_text("❌ Download failed. Please try again.")
+            logger.error("Download returned None or non-existent file")
+            await status_message.edit_text(
+                "❌ Download failed.\n\n"
+                "Please check the logs for detailed error information."
+            )
             return
         
         file_size = video_path.stat().st_size
         file_size_mb = file_size / (1024 * 1024)
         
-        await status_message.edit_text(f"✅ Download complete! ({file_size_mb:.1f} MB)\n📤 Uploading...")
+        logger.info(f"Download successful: {video_path} ({file_size_mb:.1f} MB)")
+        
+        await status_message.edit_text(f"✅ Download complete! ({file_size_mb:.1f} MB)\n📤 Uploading to Telegram...")
         
         # Split file if needed
         if file_size > TELEGRAM_FILE_LIMIT:
-            await status_message.edit_text(f"📦 Large file, splitting...")
+            await status_message.edit_text(f"📦 Large file detected ({file_size_mb:.1f} MB)\n✂️ Splitting into 1.9GB chunks...")
             chunks = split_file(video_path)
+            logger.info(f"Split into {len(chunks)} chunks")
             
             for i, chunk in enumerate(chunks, 1):
                 caption = f"Part {i}/{len(chunks)}" if len(chunks) > 1 else None
+                logger.info(f"Uploading chunk {i}/{len(chunks)}: {chunk.name}")
                 with open(chunk, 'rb') as f:
                     await update.message.reply_document(
                         document=f,
@@ -200,6 +364,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 chunk.unlink()
             video_path.unlink(missing_ok=True)
         else:
+            logger.info(f"Uploading video directly (under 2GB)")
             with open(video_path, 'rb') as f:
                 await update.message.reply_video(
                     video=f,
@@ -209,10 +374,24 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             video_path.unlink(missing_ok=True)
         
         await status_message.edit_text("✅ Upload complete!")
+        logger.info(f"Successfully completed for user {user_id}")
         
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await status_message.edit_text(f"❌ Error: {str(e)}")
+        logger.error(f"Error in handle_url for user {user_id}:\n{traceback.format_exc()}")
+        
+        # Get the latest error file if available
+        error_files = list(LOG_DIR.glob('error_*.json'))
+        error_file = error_files[-1] if error_files else None
+        
+        message = f"❌ Error: {str(e)}\n\n"
+        if error_file:
+            message += f"🔍 Debug info: {error_file.name}\n"
+            message += f"Check /logs/{error_file.name} for details."
+        
+        try:
+            await status_message.edit_text(message)
+        except:
+            await update.message.reply_text(message)
     
     finally:
         user_dir = DOWNLOAD_DIR / str(user_id)
@@ -221,14 +400,23 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log errors."""
-    logger.error(f"Error: {context.error}", exc_info=context.error)
+    """Log errors caused by updates."""
+    logger.error(f"Unhandled error in bot:\n{traceback.format_exc()}")
+    logger.error(f"Error details: {context.error}")
 
 
 def main() -> None:
     """Start the bot."""
+    logger.info("="*60)
+    logger.info("Starting Telegram Video Downloader Bot")
+    logger.info("="*60)
+    
     if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN environment variable is not set!")
         raise ValueError("TELEGRAM_BOT_TOKEN is required")
+    
+    logger.info(f"Bot token configured: {TELEGRAM_BOT_TOKEN[:10]}...")
+    logger.info(f"Log file: {log_file}")
     
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
@@ -237,7 +425,9 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     application.add_error_handler(error_handler)
     
-    logger.info("Bot started!")
+    logger.info("✅ Bot initialized successfully")
+    logger.info("🚀 Starting polling...")
+    
     application.run_polling(drop_pending_updates=True)
 
 

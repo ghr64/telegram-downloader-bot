@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DOWNLOAD_DIR = Path('./downloads')
 TELEGRAM_FILE_LIMIT = 2000 * 1024 * 1024  # 2GB limit for bots
-CHUNK_SIZE = 1900 * 1024 * 1024  # 1.9GB per chunk to be safe
+CHUNK_SIZE = 1900 * 1024 * 1024  # 1.85GB per chunk (1900MB)
 
 # Ensure download directory exists
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -212,8 +212,12 @@ def download_video(url: str, user_id: int) -> Optional[Path]:
             'retries': 3,
             'fragment_retries': 3,
             'extractor_args': {'youtube': {'player_client': [strategy['client']]}},
-            'progress_hooks': [],
-            'postprocessor_hooks': [],
+            'progress_hooks': [
+            lambda d: logger.info(f"Progress: {d.get('status', 'unknown')} - {d.get('message', '')}")
+        ],
+            'postprocessor_hooks': [
+            lambda d: logger.info(f"Post-processor: {d.get('status', 'unknown')}")
+        ],
         }
         
         # Debug: log configuration
@@ -228,10 +232,14 @@ def download_video(url: str, user_id: int) -> Optional[Path]:
                 # Set up progress hooks for detailed logging
                 def progress_hook(d):
                     status = d.get('status', 'unknown')
-                    logger.debug(f"Progress: {status} - {d}")
+                    logger.info(f"Progress: {status} - {d.get('message', '')}")
                     
                     if status == 'error':
-                        logger.error(f"Download error details: {json.dumps(d, indent=2, default=str)}")
+                        logger.error(f"Download error: {d.get('message', '')}")
+                    elif status == 'downloading':
+                        logger.info(f"Downloading... {d.get('download_current', 0)} / {d.get('download_total', 0)} bytes")
+                    elif status == 'finished':
+                        logger.info("Download complete!")
                 
                 ydl.add_progress_hook(progress_hook)
                 

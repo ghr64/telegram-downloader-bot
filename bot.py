@@ -211,7 +211,12 @@ def download_video(url: str, user_id: int) -> Optional[Path]:
             },
             'retries': 3,
             'fragment_retries': 3,
-            'extractor_args': {'youtube': {'player_client': [strategy['client']]}},
+            'extractor_args': {
+                'youtube': {
+                    'player_client': [strategy['client']],
+                    'pot_bgutil_http': ['base_url=http://127.0.0.1:4416']
+                }
+            },
             'progress_hooks': [
             lambda d: logger.info(f"Progress: {d.get('status', 'unknown')} - {d.get('message', '')}")
         ],
